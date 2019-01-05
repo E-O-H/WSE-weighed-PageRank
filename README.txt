@@ -4,4 +4,6 @@ java -cp ".;bin;D:/myJavaWorkspace/args4j-2.33.jar;D:/myJavaWorkspace/jsoup-1.11
 DIRECTORY_PATH: Path to the directory containing pages.
 F_VALUE: The probability of following links in the PageRank model.
 
+Instructions regarding the extra options:
+Use -D (-DEBUG) to print debug information (change of each page's score in each iteration step)
 Use -h (-help) to print usage.

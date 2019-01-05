@@ -9,7 +9,6 @@ import java.util.stream.Stream;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
-import org.jsoup.safety.Whitelist;
 import org.jsoup.select.Elements;
 import org.kohsuke.args4j.CmdLineException;
 import org.kohsuke.args4j.CmdLineParser;
@@ -29,6 +28,13 @@ import org.kohsuke.args4j.Option;
 public class WeightedPageRank {
   
   /*
+   * Constants
+   */
+  private static final double LINK_BASE_SCORE = 1;
+  private static final double LINK_BONUS_SCORE = 1;
+  private static final double EPSILON_MULTIPLIER = 0.01;
+  
+  /*
    * command-line arguments for the entry point
    */
   @Option(name = "-docs", aliases = "-d", required = true, 
@@ -38,6 +44,10 @@ public class WeightedPageRank {
   @Option(name = "-f", required = true, 
       usage = "The probability of following links in the PageRank model.")
   private double fVal;
+  
+  @Option(name = "-DEBUG", aliases = "-D", required = false, 
+      usage = "Debug mode flag.")
+private boolean DEBUG = false;
   
   @Option(name = "-help", aliases = "-h", required = false, 
           usage = "Print this help text.")
@@ -51,31 +61,50 @@ public class WeightedPageRank {
    */
   private class Page {
     
-    public String name;                 // File name of page
-    public double quality;              // Inherent quality of page (phi)
-    public double base;                 // Normalized quality of page (phi')
-    public List<String> outLinks;       // All out-links from the page
-    public List<Double> outLinkScores;  // All out-link scores
+    String name;                 // File name of page
+    double quality;              // Inherent quality of page (phi)
+    double base;                 // Normalized quality of page (phi')
+    double score;                // The PageRank score
+    double newScore;             // PageRank score for next iteration
+    List<String> outLinks;       // All out-links from the page
+    List<Double> outLinkScores;  // All out-link scores (theta)
     
+    /**
+     * Constructor
+     * 
+     * @param name Filename of the page
+     * @param quality Inherent quality of the page (phi)
+     */
     Page(String name, double quality) {
+      this.name = name;
       this.quality = quality;
       outLinks = new ArrayList<String>();
       outLinkScores = new ArrayList<Double>();
     }
     
+    /**
+     * Return the index of another page in this page's outLinks list
+     * 
+     * @param name Filename of the other page
+     * @return the index; or -1 if the queried page is not in this page's outLinks list
+     */
+    int outLinkIndex(String name) {
+      for (int i = 0; i < outLinks.size(); ++i) {
+        if (outLinks.get(i).equals(name)) {
+          return i;
+        }
+      }
+      return -1;
+    }
+    
   }
-  
-  /*
-   * Constants
-   */
-  private static final double LINK_BASE_SCORE = 1;
-  private static final double LINK_BONUS_SCORE = 1;
   
   /*
    * internal storage
    */
   private double epsilon;
   private List<Page> pages = new ArrayList<Page>();
+  private List<List<Double>> linkWeights;
   
   /**
    * Page quality function
@@ -146,27 +175,6 @@ public class WeightedPageRank {
     
     pages.add(page);
   }
-  /*
-N = number of pages in the collection;
-epsilon = 0.01/N;
-for (each page P in the collection)     % Calculate base values
-   P.base = log2 WordCount(P);
-sum = ¦²P P.base;
-for (each page P in the collection)     % Initialize score
-   P.score = P.base = P.base/sum;
-      
-Weight = NxN array of 0;
-for (each page P in the collection)     % Calculate link weighte
-   if (P has no outlinks)
-        for (each Q in the collection) Weight[Q,P] = Q.score;
-     else {
-        for (each outlink P -> Q) 
-            Weight[Q,P] = CalculateWeight(P,Q);
-        sum = ¦²Q Weight[Q,P]
-        for (each outlink P -> Q) 
-            Weight[Q,P] = Weight[Q,P]/sum;
-   endif
-endfor*/
   
   /**
    * Prepare all values for use in the linear equations of PageRank algorithm
@@ -184,6 +192,53 @@ endfor*/
       return 1;
     }
     
+    if (pages.isEmpty()) {
+      System.err.println("No HTML file available. Exising.");
+      System.exit(-1);
+    }
+    epsilon = EPSILON_MULTIPLIER / pages.size();
+    
+    // Calculate normalized page scores
+    double sumPageScores = 0;
+    for (Page page : pages) {
+      sumPageScores += page.quality;
+    }
+    for (Page page : pages) {
+      page.base = page.quality / sumPageScores;
+      page.score = page.base;         // Initial value for the iterate-until-convergence method 
+    }
+    
+    // Initialize matrix to store normalized link scores.
+    // linkWeights[i, j] represents the weight of link FROM j TO i
+    linkWeights = new ArrayList<List<Double>>();
+    for (int i = 0; i < pages.size(); ++i) {
+      linkWeights.add(new ArrayList<Double>());
+      for (int j = 0; j < pages.size(); ++j) {
+        linkWeights.get(i).add(Double.valueOf(0));
+      }
+    }
+    
+    // Calculate normalized link scores
+    for (int i = 0; i < pages.size(); ++i) {
+      if (pages.get(i).outLinks.isEmpty()) {
+        for (int j = 0; j < pages.size(); ++j) {
+          linkWeights.get(j).set(i, Double.valueOf(pages.get(j).score));
+        }
+      } else {
+        double sumOutLinkScores = 0;
+        for (int j = 0; j < pages.get(i).outLinkScores.size(); ++j) {
+          sumOutLinkScores += pages.get(i).outLinkScores.get(j);
+        }
+        
+        for (int j = 0; j < pages.size(); ++j) {
+          int index = pages.get(i).outLinkIndex(pages.get(j).name);
+          if (index != -1) {
+            double normalizedOutLinkScore = pages.get(i).outLinkScores.get(index) / sumOutLinkScores;
+            linkWeights.get(j).set(i, normalizedOutLinkScore);
+          }
+        }
+      }
+    }
     
     return 0;
   }
@@ -193,20 +248,54 @@ endfor*/
    */
   private void start() {
     prepareValues();
+    boolean changed;
+    do {
+      changed = false;
+      for (int i = 0; i < pages.size(); ++i) {
+        double firstTerm = (1 - fVal) * pages.get(i).base;
+        double secondTerm = 0;
+        for (int j = 0; j < pages.size(); ++j) {
+          secondTerm += fVal * pages.get(j).score * linkWeights.get(i).get(j);
+        }
+        pages.get(i).newScore =  firstTerm + secondTerm;
+        if (Math.abs(pages.get(i).newScore - pages.get(i).score) > epsilon) {
+          if (DEBUG) {
+            System.err.println(pages.get(i).name + ": " + pages.get(i).score + " > " + pages.get(i).newScore);
+          }
+          changed = true;
+        }
+      }
+      
+      for (int i = 0; i < pages.size(); ++i) {
+        pages.get(i).score = pages.get(i).newScore;
+      }
+    } while (changed);
     
+    sortResults();
+    printResults();
   }
-
-/*
-repeat {                                % Main loop
-    changed = false;
-    for (each page P in the collection) {
-        P.newscore = (1-F) * P.base + F * ¦²Q Q.score * Weight[P,Q];
-        if (abs(P.newscore - P.score) > epsilon) changed = true;
-       }
-    for (each page P in the collection)     % Initialize score
-       P.score = P.newscore;
-} while changed;
-   */
+  
+  void sortResults() {
+    pages.sort((a, b) -> {
+      if (a.score > b.score) return -1;
+      else if (a.score < b.score) return 1;
+      else return 0;
+    }); 
+  }
+  
+  void printResults() {
+    for (Page page : pages) {
+      String outputName;
+      int extensionPos = page.name.indexOf(".html");
+      if (extensionPos != -1) {
+        outputName = page.name.substring(0, extensionPos);
+      } else {
+        outputName = page.name;
+      }
+      
+      System.out.format("%15s%.4f\n", outputName, page.score);
+    }
+  }
   
   private int parseArgs(String[] args) {
     final CmdLineParser args4jCmdLineParser = new CmdLineParser(this);
